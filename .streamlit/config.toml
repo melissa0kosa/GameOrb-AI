@@ -1,7 +1,10 @@
+# Dark violet theme; app.py adds the animated lava-lamp background and glass panels.
 [theme]
-base = "light"
-primaryColor = "#2a78d6"
-backgroundColor = "#fcfcfb"
+base = "dark"
+primaryColor = "#8f6df5"
+backgroundColor = "#0b0614"
+secondaryBackgroundColor = "#1d1433"
+textColor = "#ece6ff"
 
 [server]
 headless = true

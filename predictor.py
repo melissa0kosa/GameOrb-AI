@@ -93,7 +93,15 @@ class SuccessPredictor:
         if self._pipeline is None:
             from scraper.pipeline import ScraperPipeline
             self._pipeline = ScraperPipeline(cache_db_path=self.cache_db, request_delay=1.0)
-        return self._pipeline.fetch_game(int(appid))
+        game = self._pipeline.fetch_game(int(appid))
+        if game:
+            # the store page is cached by now; keep its real header image URL (newer games
+            # store it under a hashed path, so it can't be built from the AppID alone)
+            from scraper.enrichment import _load_storefront
+            d = _load_storefront(self.cache_db, [int(appid)]).get(int(appid)) or {}
+            d = d.get("data", d) if isinstance(d, dict) else {}
+            game["header_image"] = d.get("header_image") or d.get("capsule_image")
+        return game
 
     def frame_from_game(self, game: dict) -> pd.DataFrame:
         return enrich(pd.DataFrame([game]), cache_db=self.cache_db, catalog=self.catalog)

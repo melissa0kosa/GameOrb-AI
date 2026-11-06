@@ -83,7 +83,7 @@ pip install -r requirements.txt
 streamlit run app.py          # opens http://localhost:8501
 ```
 
-- **Look up a Steam game**: paste an AppID or store link (released or upcoming).
+- **Look up a Steam game**: type a game name and pick from live Steam-store suggestions (released or upcoming; falls back to the local catalog if Steam is unreachable). A store link or AppID also works.
 - **Plan a new game**: describe a game with no Steam page yet (price, genres, tags,
   languages, platforms, store page, studio) and see its forecast plus "what-if" changes.
 - **About the model**: data, metrics and limitations.
