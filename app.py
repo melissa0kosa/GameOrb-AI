@@ -282,6 +282,25 @@ html, body, .stApp {background: #0b0614;}
 button[aria-checked="true"] {background: #7c5cf0 !important; border-color: #9b80ff !important;
                               color: #ffffff !important;}
 button[aria-checked="true"] * {color: #ffffff !important;}
+/* ---- "How could this game sell more?" list ---- */
+.wi-list {display: flex; flex-direction: column; gap: .7rem; margin-top: .8rem;}
+.wi-row {background: rgba(255,255,255,.04); border: 1px solid rgba(190,165,255,.14); border-radius: 12px;
+         padding: .7rem .85rem; transition: border-color .3s, background .3s;}
+.wi-row:hover {background: rgba(143,109,245,.1); border-color: rgba(190,165,255,.35);}
+.wi-top {display: flex; justify-content: space-between; align-items: baseline; gap: .8rem;}
+.wi-name {color: #f3eeff; font-weight: 600; font-size: .95rem;}
+.wi-pct {color: #cbbcff; font-weight: 700; font-size: 1.05rem; white-space: nowrap;}
+.wi-row.down .wi-pct {color: #ff8a87;}
+.wi-tag {display: inline-block; margin-left: .5rem; padding: .05rem .5rem; border-radius: 999px; font-size: .7rem;
+         font-weight: 600; letter-spacing: .03em; color: #fff; background: #7c5cf0; vertical-align: 2px;}
+.wi-bar {height: 6px; border-radius: 999px; background: rgba(255,255,255,.07); margin: .45rem 0 .4rem 0; overflow: hidden;}
+.wi-bar span {display: block; height: 100%; border-radius: 999px;
+              background: linear-gradient(90deg, #6e52d6, #a58bff); transform-origin: left;
+              animation: growBar 1s cubic-bezier(.2,.7,.2,1) .2s both;}
+.wi-row.down .wi-bar span {background: #e8524f;}
+.wi-result {color: #cfc4ec; font-size: .85rem;}
+.wi-result b {color: #ffffff;}
+@keyframes growBar {from {transform: scaleX(0);} to {transform: scaleX(1);}}
 /* the zero-height script frame takes no space */
 [data-testid="stElementContainer"]:has(> iframe[height="0"]), [data-testid="stElementContainer"]:has(iframe[height="0"]) {display: none;}
 /* ---- pop-up when a section scrolls into view (classes set by the script at the end) ---- */
@@ -448,22 +467,23 @@ def curve_chart(res: dict) -> alt.Chart:
     return (band + line + pts + now).properties(height=290).configure_view(stroke=None).configure(background="transparent")
 
 
-def what_if_chart(rows: list) -> alt.Chart:
-    c = pal()
-    df = pd.DataFrame(rows)
-    df["pct"] = (df["factor"] - 1) * 100
-    df["Direction"] = df["pct"].map(lambda v: "More owners" if v >= 0 else "Fewer owners")
-    y = alt.Y("change:N", sort=None, title=None,
-              scale=alt.Scale(paddingInner=0.35, paddingOuter=0.2), axis=alt.Axis(labelLimit=260, labelFontSize=12, labelOverlap=False))
-    bars = alt.Chart(df).mark_bar(cornerRadiusEnd=4).encode(
-        y=y,
-        x=alt.X("pct:Q", title="Change in predicted owners (%)", axis=alt.Axis(gridColor=c["grid"], format="+.0f")),
-        color=alt.Color("Direction:N", scale=alt.Scale(domain=["More owners", "Fewer owners"], range=[c["blue"], c["red"]]),
-                        legend=alt.Legend(orient="top", title=None)),
-        tooltip=[alt.Tooltip("change:N", title="Change"), alt.Tooltip("pct:Q", title="Owners (%)", format="+.0f")])
-    zero = alt.Chart(pd.DataFrame({"z": [0]})).mark_rule(color=c["rule"], strokeWidth=1).encode(
-        x=alt.X("z:Q", title="Change in predicted owners (%)"))
-    return (bars + zero).properties(height=alt.Step(38)).configure_view(stroke=None).configure(background="transparent")
+def what_if_html(rows: list, base_owners: float) -> str:
+    """Ranked list: each row = one change, the owners it leads to, and a bar for the size of the effect."""
+    biggest = max(abs(r["factor"] - 1) for r in rows)
+    out = []
+    for i, r in enumerate(rows):
+        pct = (r["factor"] - 1) * 100
+        up = pct >= 0
+        width = max(4.0, abs(r["factor"] - 1) / biggest * 100)
+        tag = '<span class="wi-tag">Biggest boost</span>' if i == 0 and up else ""
+        out.append(
+            f'<div class="wi-row{" down" if not up else ""}">'
+            f'<div class="wi-top"><span class="wi-name">{esc(r["change"])}{tag}</span>'
+            f'<span class="wi-pct">{pct:+.0f}%</span></div>'
+            f'<div class="wi-bar"><span style="width:{width:.0f}%"></span></div>'
+            f'<div class="wi-result">{fmt_count(base_owners)} &rarr; <b>{fmt_count(base_owners * r["factor"])}</b>'
+            f' estimated owners</div></div>')
+    return '<div class="wi-list">' + "".join(out) + "</div>"
 
 
 # ---------------------------------------------------------------------------- result view
@@ -543,22 +563,28 @@ def show_result(df: pd.DataFrame, name: str, key: str, appid=None):
             st.dataframe(pd.DataFrame([{"Years on sale": y, "Estimated owners": fmt_count(o)}
                                        for y, o in res["curve"]]), hide_index=True, use_container_width=True)
 
-    rows = [r for r in p.what_if(df, h) if abs(r["factor"] - 1) >= 0.03]
+    all_rows = p.what_if(df, h)
+    rows = [r for r in all_rows if abs(r["factor"] - 1) >= 0.03]
     with right.container(border=True, key=f"panel_whatif_{key}"):
-        st.markdown(f'<div class="section-title">{badge("bulb")} What could move the needle</div>'
-                    '<div class="muted">How the estimate changes if you add each of these</div>',
+        st.markdown(f'<div class="section-title">{badge("bulb")} How could this game sell more?</div>'
+                    '<div class="muted">We re-ran the prediction with <b>one change at a time</b>, keeping '
+                    'everything else the same. Each row shows where the estimate would land.</div>',
                     unsafe_allow_html=True)
         if rows:
-            st.altair_chart(what_if_chart(rows), use_container_width=True)
-            st.caption("Patterns learned from existing games, not guaranteed effects: bigger games tend to "
-                       "have more languages and achievements, so part of each effect is correlation.")
-            with st.expander("Show as table"):
-                st.dataframe(pd.DataFrame([{"Change": r["change"],
-                                            "Change in owners": f"{(r['factor'] - 1) * 100:+.0f}%"} for r in rows]),
-                             hide_index=True, use_container_width=True)
+            st.markdown(what_if_html(rows, res["owners"]), unsafe_allow_html=True)
+            st.caption("Based on patterns in similar Steam games, not a guarantee: bigger games also tend to "
+                       "have more languages and achievements, so part of each boost is that correlation.")
+        elif all_rows:
+            tested = ", ".join(r["change"].lower() for r in all_rows)
+            if len(all_rows) == 1:
+                st.info(f"This game already has most of what we test. The one remaining change ({tested}) "
+                        "would move the estimate by less than 3%, so it isn't a clear win.")
+            else:
+                st.info(f"The changes we tested ({tested}) would each move the estimate by less than 3%, "
+                        "so none of them is a clear win.")
         else:
-            st.info("This game already has the usual extras - none of the standard changes moves the "
-                    "estimate by 3% or more.")
+            st.info("This game already has everything we test: major European and Chinese translations, "
+                    "controller support, achievements, a demo, 2+ trailers and Mac & Linux versions.")
 
     # --- studio + hype
     extras = []
