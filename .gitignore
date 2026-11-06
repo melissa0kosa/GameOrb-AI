@@ -1,0 +1,25 @@
+# Environment / IDE
+.venv/
+.idea/
+__pycache__/
+*.pyc
+.playwright-mcp/
+
+# Raw scraped Steam pages: large (40+ MB), not needed by the app, and raw copies of
+# Steam content should not be republished
+data/scraper_cache.db
+
+# Local tracking data (grows daily; personal working data)
+data/velocity_history*.db
+data/prelaunch_dataset.csv
+
+# Logs, backups, legacy artifacts
+data/*.log
+data/*backup*
+data/trained_model.joblib
+data/test_sample.csv
+
+# Kept on purpose (the app needs them):
+#   data/success_model.joblib       trained Stage 1 model (~4 MB)
+#   data/steamspy_catalog.db        studio track record (~7 MB)
+#   data/game_commercial_dataset.csv training data (summary features, ~1 MB)
