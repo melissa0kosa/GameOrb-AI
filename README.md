@@ -1,4 +1,8 @@
-# Predictive Game Analytics Scraper for Steam
+# GameOrb AI
+
+Predicts the commercial success of Steam games - estimated owners, gross revenue and success tier - from their store page or from a description of a game that is still being planned.
+
+## Data pipeline: game analytics scraper for Steam
 
 A high-performance, modular web scraper and dataset generator designed specifically for **training AI / Machine Learning models that predict the commercial success of video games**.
 
@@ -10,7 +14,7 @@ It aggregates data across:
 
 ---
 
-## 🎯 Key Extracted Features for AI Models
+## Key Extracted Features for AI Models
 
 The pipeline extracts **152 ML-ready features** and separates them into input predictors (`X`) and commercial ground-truth targets (`y`):
 
@@ -76,7 +80,7 @@ The pipeline extracts **152 ML-ready features** and separates them into input pr
 
 ---
 
-## 🌐 Web app
+## Web app
 
 ```bash
 pip install -r requirements.txt
@@ -102,7 +106,7 @@ After retraining (`python train_model.py`), commit the new `data/success_model.j
 If you upgrade scikit-learn or numpy, retrain before deploying: the model file only
 loads reliably with the versions pinned in `requirements.txt`.
 
-## 🚀 Quickstart
+## Quickstart
 
 ### 1. Installation
 ```bash
@@ -225,7 +229,7 @@ Outputs:
 
 ---
 
-## 📁 Project Architecture
+## Project Architecture
 
 ```
 PredictiveAIGames/
@@ -250,6 +254,6 @@ PredictiveAIGames/
 └── README.md
 ```
 
-## 🛡️ Polite Crawling & Resilience
+## Polite Crawling & Resilience
 - **Adaptive Jitter & Backoff**: Automatically respects Steam & SteamSpy rate limits (~1.0s delay by default, exponential backoff on HTTP 429).
 - **SQLite Response Cache**: If a scrape is interrupted or rerun, previously fetched games are read instantly from the local database without making duplicate network requests.

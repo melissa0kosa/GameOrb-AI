@@ -1,5 +1,5 @@
 """
-Steam Game Success Predictor - Streamlit front end.
+GameOrb AI - Streamlit front end (Steam game commercial-success predictor).
 
 Run locally:   streamlit run app.py
 """
@@ -20,7 +20,7 @@ from train_model import owners_to_tier
 from predictor import (FEATURE_LABELS, LANGUAGE_LABELS, STORE_GENRES, TAGS, SuccessPredictor,
                        parse_appid, tag_column)
 
-st.set_page_config(page_title="Steam Game Success Predictor", page_icon=":material/sports_esports:", layout="wide",
+st.set_page_config(page_title="GameOrb AI", page_icon=":material/sports_esports:", layout="wide",
                    initial_sidebar_state="collapsed")
 
 # Chart colors for the dark violet theme, validated with the dataviz palette checker against the
@@ -618,7 +618,7 @@ components.html("""<script>
 p = get_predictor()
 info = p.info
 
-_words = ["Steam", "Game", "<span class='grad'>Success</span>", "Predictor"]
+_words = ["GameOrb", "<span class='grad'>AI</span>"]
 hero_words = " ".join(f'<span class="w" style="animation-delay:{.15 + i * .12:.2f}s">{w}</span>'
                       for i, w in enumerate(_words))
 st.markdown(f"""

@@ -16,7 +16,7 @@ from typing import List, Optional, Tuple
 import requests
 
 STEAM_SEARCH_URL = "https://store.steampowered.com/api/storesearch/"
-HEADERS = {"User-Agent": "Mozilla/5.0 (SteamGameSuccessPredictor)"}
+HEADERS = {"User-Agent": "Mozilla/5.0 (GameOrbAI)"}
 # Not games: soundtracks, artbooks, wallpapers, supporter packs, tools...
 NON_GAME = re.compile(r"\b(soundtrack|ost|artbook|art book|wallpapers?|supporter pack|"
                       r"season pass|dedicated server|sdk|demo)\b", re.I)
