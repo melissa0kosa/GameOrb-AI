@@ -302,7 +302,7 @@ button[aria-checked="true"] * {color: #ffffff !important;}
 .wi-result b {color: #ffffff;}
 @keyframes growBar {from {transform: scaleX(0);} to {transform: scaleX(1);}}
 /* the zero-height script frame takes no space */
-[data-testid="stElementContainer"]:has(> iframe[height="0"]), [data-testid="stElementContainer"]:has(iframe[height="0"]) {display: none;}
+[data-testid="stElementContainer"]:has(iframe[title="st.iframe"]) {display: none;}
 /* ---- pop-up when a section scrolls into view (classes set by the script at the end) ---- */
 .pop-ready {opacity: 0; transform: translateY(38px) scale(.9);}
 .pop-in {animation: popIn .75s cubic-bezier(.34,1.56,.64,1) both;}
@@ -566,7 +566,7 @@ def show_result(df: pd.DataFrame, name: str, key: str, appid=None):
     all_rows = p.what_if(df, h)
     rows = [r for r in all_rows if abs(r["factor"] - 1) >= 0.03]
     with right.container(border=True, key=f"panel_whatif_{key}"):
-        st.markdown(f'<div class="section-title">{badge("bulb")} How could this game sell more?</div>'
+        st.markdown(f'<div class="section-title">{badge("bulb")} What moves the needle</div>'
                     '<div class="muted">We re-ran the prediction with <b>one change at a time</b>, keeping '
                     'everything else the same. Each row shows where the estimate would land.</div>',
                     unsafe_allow_html=True)
