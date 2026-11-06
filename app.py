@@ -299,10 +299,20 @@ button[aria-checked="true"] * {color: #ffffff !important;}
               animation: growBar 1s cubic-bezier(.2,.7,.2,1) .2s both;}
 .wi-row.down .wi-bar span {background: #e8524f;}
 .wi-result {color: #cfc4ec; font-size: .85rem;}
+.wi-row.flat .wi-pct {color: #9d93bd; font-weight: 600; font-size: .85rem;}
+.wi-row.flat .wi-bar span {background: rgba(203,188,255,.35);}
+.wi-done-row {display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin-top: .8rem;}
+.wi-done-label {color: #b3a6d4; font-size: .8rem; text-transform: uppercase; letter-spacing: .05em; margin-right: .2rem;}
+.wi-done {display: inline-flex; align-items: center; gap: .3rem; padding: .15rem .6rem; border-radius: 999px;
+          font-size: .82rem; color: #e2d8ff; background: rgba(143,109,245,.16); border: 1px solid rgba(185,160,255,.28);}
+.wi-done .ico {color: #a8f0c6;}
 .wi-result b {color: #ffffff;}
 @keyframes growBar {from {transform: scaleX(0);} to {transform: scaleX(1);}}
 /* the zero-height script frame takes no space */
 [data-testid="stElementContainer"]:has(iframe[title="st.iframe"]) {display: none;}
+/* the search box frame sets a fixed pixel width once while the page is still settling;
+   always make it fill its panel instead */
+iframe[title*="searchbox"] {width: 100% !important; max-width: 100% !important; display: block;}
 /* ---- pop-up when a section scrolls into view (classes set by the script at the end) ---- */
 .pop-ready {opacity: 0; transform: translateY(38px) scale(.9);}
 .pop-in {animation: popIn .75s cubic-bezier(.34,1.56,.64,1) both;}
@@ -467,23 +477,38 @@ def curve_chart(res: dict) -> alt.Chart:
     return (band + line + pts + now).properties(height=290).configure_view(stroke=None).configure(background="transparent")
 
 
+# Every change the what-if analysis can test (labels must match SuccessPredictor.what_if)
+WHAT_IF_CHECKS = ["Add French, German & Spanish", "Add Simplified Chinese", "Add full controller support",
+                  "Add Steam achievements (30)", "Release a demo", "Have 2+ trailers", "Ship on Mac & Linux too"]
+DONE_LABELS = {"Add French, German & Spanish": "French, German & Spanish", "Add Simplified Chinese": "Chinese",
+               "Add full controller support": "Controller support", "Add Steam achievements (30)": "Achievements",
+               "Release a demo": "Demo", "Have 2+ trailers": "2+ trailers", "Ship on Mac & Linux too": "Mac & Linux"}
+
+
 def what_if_html(rows: list, base_owners: float) -> str:
     """Ranked list: each row = one change, the owners it leads to, and a bar for the size of the effect."""
-    biggest = max(abs(r["factor"] - 1) for r in rows)
+    biggest = max(max(abs(r["factor"] - 1) for r in rows), 1e-9)
     out = []
     for i, r in enumerate(rows):
         pct = (r["factor"] - 1) * 100
-        up = pct >= 0
-        width = max(4.0, abs(r["factor"] - 1) / biggest * 100)
-        tag = '<span class="wi-tag">Biggest boost</span>' if i == 0 and up else ""
+        small = abs(pct) < 3
+        cls = " flat" if small else (" down" if pct < 0 else "")
+        width = max(3.0, abs(r["factor"] - 1) / biggest * 100)
+        tag = '<span class="wi-tag">Biggest boost</span>' if i == 0 and pct >= 3 else ""
+        pct_txt = "little effect" if small else f"{pct:+.0f}%"
         out.append(
-            f'<div class="wi-row{" down" if not up else ""}">'
+            f'<div class="wi-row{cls}">'
             f'<div class="wi-top"><span class="wi-name">{esc(r["change"])}{tag}</span>'
-            f'<span class="wi-pct">{pct:+.0f}%</span></div>'
+            f'<span class="wi-pct">{pct_txt}</span></div>'
             f'<div class="wi-bar"><span style="width:{width:.0f}%"></span></div>'
             f'<div class="wi-result">{fmt_count(base_owners)} &rarr; <b>{fmt_count(base_owners * r["factor"])}</b>'
-            f' estimated owners</div></div>')
+            f' owners</div></div>')
     return '<div class="wi-list">' + "".join(out) + "</div>"
+
+
+def done_html(done: list) -> str:
+    chips = "".join(f'<span class="wi-done">{icon("check", 14)} {esc(DONE_LABELS[d])}</span>' for d in done)
+    return f'<div class="wi-done-row"><span class="wi-done-label">Already has</span>{chips}</div>'
 
 
 # ---------------------------------------------------------------------------- result view
@@ -564,27 +589,17 @@ def show_result(df: pd.DataFrame, name: str, key: str, appid=None):
                                        for y, o in res["curve"]]), hide_index=True, use_container_width=True)
 
     all_rows = p.what_if(df, h)
-    rows = [r for r in all_rows if abs(r["factor"] - 1) >= 0.03]
+    tested = {r["change"] for r in all_rows}
+    done = [c for c in WHAT_IF_CHECKS if c not in tested]
     with right.container(border=True, key=f"panel_whatif_{key}"):
         st.markdown(f'<div class="section-title">{badge("bulb")} What moves the needle</div>'
-                    '<div class="muted">We re-ran the prediction with <b>one change at a time</b>, keeping '
-                    'everything else the same. Each row shows where the estimate would land.</div>',
+                    '<div class="muted">One change at a time, everything else kept the same.</div>',
                     unsafe_allow_html=True)
-        if rows:
-            st.markdown(what_if_html(rows, res["owners"]), unsafe_allow_html=True)
-            st.caption("Based on patterns in similar Steam games, not a guarantee: bigger games also tend to "
-                       "have more languages and achievements, so part of each boost is that correlation.")
-        elif all_rows:
-            tested = ", ".join(r["change"].lower() for r in all_rows)
-            if len(all_rows) == 1:
-                st.info(f"This game already has most of what we test. The one remaining change ({tested}) "
-                        "would move the estimate by less than 3%, so it isn't a clear win.")
-            else:
-                st.info(f"The changes we tested ({tested}) would each move the estimate by less than 3%, "
-                        "so none of them is a clear win.")
-        else:
-            st.info("This game already has everything we test: major European and Chinese translations, "
-                    "controller support, achievements, a demo, 2+ trailers and Mac & Linux versions.")
+        if all_rows:
+            st.markdown(what_if_html(all_rows, res["owners"]), unsafe_allow_html=True)
+        if done:
+            st.markdown(done_html(done), unsafe_allow_html=True)
+        st.caption("Patterns from similar games, not guarantees.")
 
     # --- studio + hype
     extras = []
@@ -633,10 +648,20 @@ components.html("""<script>
       }, {once: true});
     }
   }, {threshold: 0.12, rootMargin: '0px 0px -40px 0px'});
-  const scan = () => d.querySelectorAll(SEL).forEach(el => {
+  const scan = () => {
+   // a frame can be inserted after its section was prepared: undo the pop for those right away
+   d.querySelectorAll('.pop-ready').forEach(el => {
+     if (el.querySelector('iframe')) { io.unobserve(el); el.classList.remove('pop-ready', 'pop-in'); }
+   });
+   d.querySelectorAll(SEL).forEach(el => {
     if (el.dataset.pop) return;
-    el.dataset.pop = '1'; el.classList.add('pop-ready'); io.observe(el);
-  });
+    el.dataset.pop = '1';
+    // never animate sections that contain an embedded frame (the search box): it measures its own
+    // width while the section is mid-bounce and would keep that wrong, oversized width
+    if (el.querySelector('iframe')) return;
+    el.classList.add('pop-ready'); io.observe(el);
+   });
+  };
   scan();
   new w.MutationObserver(scan).observe(d.body, {childList: true, subtree: true});
 })();
