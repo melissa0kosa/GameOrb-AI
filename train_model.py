@@ -92,6 +92,7 @@ LOG_COLS = [
 # Feature groups (for ablation and for switching groups off)
 STORE_PREFIXES = ("store_", "req_")
 TRACK_PREFIXES = ("dev_", "pub_", "is_debut_developer")
+CONTEXT_PREFIXES = ("ctx_",)
 N_TEXT_COMPONENTS = 40
 
 
@@ -106,9 +107,41 @@ def owners_to_tier(owners: np.ndarray, revenue: np.ndarray) -> np.ndarray:
     return tier
 
 
+# "boxleiter": owners = reviews x 35 for every game.
+# "adjusted" : sales-per-review depends on release year, review score and price, following
+#              published industry analyses (VG Insights, Gamalytic, GameDiscoverCo):
+#              ~70 per review before 2014 -> ~30 from 2020 on (Steam began prompting players
+#              to review in 2019, roughly halving the ratio); very well-reviewed games
+#              (>90% positive) ~30 per review vs ~60 around 70% positive; free games about
+#              twice the paid ratio; cheaper paid games somewhat higher.
+TARGET_MODE = "boxleiter"
+_YEAR_RATIO = {2013: 70.0, 2014: 62.0, 2015: 58.0, 2016: 55.0, 2017: 50.0, 2018: 45.0, 2019: 38.0}
+
+
+def sales_per_review(year, pos_ratio, price, is_free) -> np.ndarray:
+    year = pd.to_numeric(pd.Series(year), errors="coerce").fillna(2020).to_numpy()
+    base = np.array([_YEAR_RATIO[2013] if y <= 2013 else _YEAR_RATIO.get(int(y), 30.0) for y in year])
+    pos = pd.to_numeric(pd.Series(pos_ratio), errors="coerce").fillna(0.8).to_numpy()
+    score = np.interp(pos, [0.0, 0.5, 0.7, 0.85, 0.95, 1.0], [0.9, 1.0, 1.5, 1.1, 0.85, 0.8])
+    price = pd.to_numeric(pd.Series(price), errors="coerce").fillna(0).to_numpy()
+    price_f = np.interp(price, [0, 5, 15, 30, 60], [1.25, 1.15, 1.0, 0.9, 0.8])
+    free = np.asarray(pd.Series(is_free).fillna(0).to_numpy(), dtype=float) == 1
+    return base * score * np.where(free, 2.0, price_f)
+
+
 def build_targets(df: pd.DataFrame) -> pd.DataFrame:
     reviews = pd.to_numeric(df["target_total_reviews"], errors="coerce").fillna(0)
-    owners = np.maximum(reviews, 1) * REVIEW_MULTIPLIER
+    # A few review lookups come back empty (e.g. Stacklands: 0 reviews, 29k recommendations);
+    # fall back to Steam's recommendation count, which tracks the review count closely.
+    if "target_steam_recommendations" in df:
+        recs = pd.to_numeric(df["target_steam_recommendations"], errors="coerce").fillna(0)
+        reviews = reviews.where(reviews > 0, recs)
+    if TARGET_MODE == "adjusted":
+        mult = sales_per_review(df["release_year"], df.get("target_review_positive_ratio"),
+                                df["initial_price_usd"], df["is_free"])
+    else:
+        mult = REVIEW_MULTIPLIER
+    owners = np.maximum(reviews, 1) * mult
     price = pd.to_numeric(df["initial_price_usd"], errors="coerce").fillna(0)
     revenue = np.where(df["is_free"] == 1, 0.0, owners * price)
     out = pd.DataFrame(index=df.index)
@@ -125,10 +158,12 @@ class FeatureBuilder:
     latent text topics (TF-IDF + SVD) from the store description."""
 
     def __init__(self, with_followers: bool = False, use_store: bool = True,
-                 use_text: bool = True, use_track: bool = True, use_age: bool = True):
+                 use_text: bool = True, use_track: bool = True, use_age: bool = True,
+                 use_context: bool = True):
         self.with_followers = with_followers
         self.use_store, self.use_text, self.use_track = use_store, use_text, use_track
         self.use_age = use_age
+        self.use_context = use_context
         self.feature_cols: list = []
         self.imputer = SimpleImputer(strategy="median")
         self.tfidf = None
@@ -142,6 +177,8 @@ class FeatureBuilder:
             if c in FOLLOWER_COLS and not (self.with_followers and c == "community_followers"):
                 continue
             if c.startswith(STORE_PREFIXES) and not self.use_store:
+                continue
+            if c.startswith(CONTEXT_PREFIXES) and not getattr(self, "use_context", True):
                 continue
             if c.startswith(TRACK_PREFIXES) and not self.use_track:
                 continue
@@ -228,9 +265,11 @@ def candidate_models():
         "Ridge regression": make_pipeline(StandardScaler(), RidgeCV(alphas=np.logspace(-1, 3, 20))),
         "Random forest": RandomForestRegressor(
             n_estimators=500, min_samples_leaf=2, max_features=0.33, random_state=42, n_jobs=-1),
+        # tuned on 5.9k games (5-fold x 3): deeper trees + slower learning + feature subsampling
+        # cut MAE 0.549 -> 0.516 and lifted the 2023-24 time test from 64.3% to 65.8% tier accuracy
         "Gradient boosting": HistGradientBoostingRegressor(
-            max_iter=200, learning_rate=0.05, max_depth=3, min_samples_leaf=5,
-            l2_regularization=1.0, random_state=42),
+            max_iter=1200, learning_rate=0.015, max_depth=6, min_samples_leaf=30,
+            l2_regularization=1.0, max_features=0.3, random_state=42),
     }
 
 
@@ -292,11 +331,12 @@ def temporal_holdout(df, model, fb_kwargs, train_until=2022, test_years=(2023, 2
 def run_ablation(df, y, rpo, with_followers, repeats=3):
     """Show what each feature group adds, using gradient boosting."""
     steps = [
-        ("Original features", dict(use_store=False, use_text=False, use_track=False, use_age=False)),
-        ("+ game age", dict(use_store=False, use_text=False, use_track=False)),
-        ("+ store-page stats", dict(use_store=True, use_text=False, use_track=False)),
-        ("+ description text", dict(use_store=True, use_text=True, use_track=False)),
-        ("+ studio track record", dict(use_store=True, use_text=True, use_track=True)),
+        ("Original features", dict(use_store=False, use_text=False, use_track=False, use_age=False, use_context=False)),
+        ("+ game age", dict(use_store=False, use_text=False, use_track=False, use_context=False)),
+        ("+ store-page stats", dict(use_store=True, use_text=False, use_track=False, use_context=False)),
+        ("+ description text", dict(use_store=True, use_text=True, use_track=False, use_context=False)),
+        ("+ studio track record", dict(use_store=True, use_text=True, use_track=True, use_context=False)),
+        ("+ genre context", dict(use_store=True, use_text=True, use_track=True, use_context=True)),
     ]
     gb = candidate_models()["Gradient boosting"]
     print(f"\nFeature-group ablation (gradient boosting, 5-fold x {repeats}):")
@@ -319,7 +359,12 @@ def main():
     ap.add_argument("--catalog-db", default="data/steamspy_catalog.db",
                     help="SteamSpy catalog from build_catalog_index.py (studio track record)")
     ap.add_argument("--ablation", action="store_true", help="Report the gain from each feature group")
+    ap.add_argument("--target", choices=["boxleiter", "adjusted"], default="boxleiter",
+                    help="Owner estimate: flat reviews x 35, or sales-per-review adjusted for release year, "
+                         "review score and price (tested Nov 2026: same accuracy on the 2023-24 time test)")
     args = ap.parse_args()
+    global TARGET_MODE
+    TARGET_MODE = args.target
 
     if not os.path.exists(args.data):
         sys.exit(f"Dataset not found: {args.data}")
@@ -387,7 +432,7 @@ def main():
         "model": best, "model_name": best_name, "feature_builder": fb,
         "residual_q": np.quantile(resid, [0.1, 0.9]).tolist(),
         "cv_results": results, "n_train": len(df), "tier_names": TIER_NAMES,
-        "review_multiplier": REVIEW_MULTIPLIER, "with_followers": args.with_followers,
+        "review_multiplier": REVIEW_MULTIPLIER, "target_mode": TARGET_MODE, "with_followers": args.with_followers,
         "temporal_holdout": th, "default_horizon_years": DEFAULT_HORIZON_YEARS, "catalog_db": args.catalog_db if catalog.available else None,
     }
     os.makedirs(os.path.dirname(os.path.abspath(args.save)), exist_ok=True)

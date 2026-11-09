@@ -39,6 +39,9 @@ class ScraperPipeline:
     ):
         self.cache_db_path = cache_db_path
         self.enable_cache = enable_cache
+        # Follower counts of released games are post-launch data (excluded from training) and the
+        # community endpoint is heavily throttled; training scrapes can switch them off.
+        self.fetch_followers = True
         os.makedirs(os.path.dirname(os.path.abspath(cache_db_path)), exist_ok=True)
 
         self.steam_api = SteamApiClient(request_delay=request_delay)
@@ -131,7 +134,7 @@ class ScraperPipeline:
         followers = None
         if not refresh_cache:
             followers = self._get_cached_data(appid, "followers", max_age_hours=12.0)
-        if followers is None:
+        if followers is None and self.fetch_followers:
             followers = self.steam_api.get_community_followers(appid)
             if followers is not None:
                 self._set_cached_data(appid, "followers", followers)
@@ -180,15 +183,21 @@ class ScraperPipeline:
         Scrape a list of AppIDs and compile into a DataFrame.
         """
         records: List[Dict[str, Any]] = []
+        checkpoint = f"{output_csv}.partial.csv" if output_csv else None
 
         logger.info("Beginning scrape for %d games...", len(appids))
-        for aid in tqdm(appids, desc="Scraping games"):
+        for n, aid in enumerate(tqdm(appids, desc="Scraping games"), 1):
             try:
                 row = self.fetch_game(aid, refresh_cache=refresh_cache)
                 if row:
                     records.append(row)
             except Exception as e:
                 logger.error("Failed to process appid %d: %s", aid, e)
+            if checkpoint and n % 200 == 0 and records:
+                # progress checkpoint: a crash or reboot loses at most 200 games (raw responses are
+                # also cached, so re-running the same command is fast)
+                pd.DataFrame(records).to_csv(checkpoint, index=False, encoding="utf-8")
+                logger.info("Checkpoint: %d games scraped so far -> %s", len(records), checkpoint)
 
         df = pd.DataFrame(records)
 
@@ -203,6 +212,8 @@ class ScraperPipeline:
                     logger.warning("Failed to merge with existing CSV: %s", e)
             df.to_csv(output_csv, index=False, encoding="utf-8")
             logger.info("Saved %d records to %s", len(df), output_csv)
+            if checkpoint and os.path.exists(checkpoint):
+                os.remove(checkpoint)
 
         if output_json and not df.empty:
             os.makedirs(os.path.dirname(os.path.abspath(output_json)), exist_ok=True)

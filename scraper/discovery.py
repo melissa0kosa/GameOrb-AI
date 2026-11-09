@@ -204,6 +204,52 @@ class GameDiscoverer:
         rng.shuffle(chosen)
         return chosen
 
+    def discover_balanced_from_catalog(
+        self, target_count: int = 2000, catalog_db: str = "data/steamspy_catalog.db",
+        exclude: Optional[set] = None, seed: int = 2026
+    ) -> List[int]:
+        """
+        Same tier-balanced sampling as discover_balanced_training_sample, but from the locally
+        downloaded SteamSpy catalog (82k games; no 1-request-per-minute waits), skipping AppIDs
+        that are already in the dataset.
+        """
+        import random
+        import sqlite3
+        exclude = exclude or set()
+        with sqlite3.connect(catalog_db) as con:
+            rows = con.execute("SELECT appid, COALESCE(positive,0)+COALESCE(negative,0), "
+                               "COALESCE(initialprice,0) FROM catalog").fetchall()
+        buckets: dict = {0: [], 1: [], 2: [], 3: []}
+        for appid, reviews, price_cents in rows:
+            if int(appid) in exclude:
+                continue
+            owners = max(reviews, 1) * 35
+            rev = owners * (price_cents or 0) / 100.0
+            if owners >= 1_000_000 or rev >= 5_000_000:
+                t = 3
+            elif owners >= 100_000 or rev >= 250_000:
+                t = 2
+            elif owners >= 10_000 or rev >= 25_000:
+                t = 1
+            else:
+                t = 0
+            buckets[t].append(int(appid))
+        rng = random.Random(seed)
+        per_tier = target_count // 4
+        chosen: List[int] = []
+        for t, ids in buckets.items():
+            ids = sorted(ids)
+            rng.shuffle(ids)
+            chosen.extend(ids[:per_tier])
+            logger.info("Tier %d: %d new candidates, sampled %d", t, len(ids), min(per_tier, len(ids)))
+        if len(chosen) < target_count:
+            taken = set(chosen)
+            spare = [i for ids in buckets.values() for i in ids if i not in taken]
+            rng.shuffle(spare)
+            chosen.extend(spare[: target_count - len(chosen)])
+        rng.shuffle(chosen)
+        return chosen
+
     def discover_diverse_training_sample(self, target_count: int = 100) -> List[int]:
         """
         Discovers a diverse balance of games for training ML models:

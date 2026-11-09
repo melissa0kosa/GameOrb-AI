@@ -16,14 +16,18 @@ Usage examples:
 
   # Tier-balanced training set (hits AND flops) - recommended for model training:
   python run_scraper.py --mode balanced --limit 2000 --append
+  # Same, but from the local catalog, skipping games already in the dataset (no SteamSpy waits):
+  python run_scraper.py --mode balanced-local --limit 2000 --append --no-followers
 
   # Scrape specific AppIDs:
   python run_scraper.py --appids 1086940 1145360 2124490
 """
 
 import argparse
+import os
 import sys
 import logging
+import pandas as pd
 from scraper import ScraperPipeline, GameDiscoverer
 
 logging.basicConfig(
@@ -40,7 +44,7 @@ def parse_args():
     )
     parser.add_argument(
         "--mode",
-        choices=["sample", "top", "upcoming", "tag", "appids", "catalog", "balanced"],
+        choices=["sample", "top", "upcoming", "tag", "appids", "catalog", "balanced", "balanced-local"],
         default="sample",
         help="Scrape discovery mode: 'sample' (diverse mix), 'top' (SteamSpy top games), 'upcoming' (coming soon), 'tag', 'catalog' (full pages of 1,000 games each), 'balanced' (equal games per success tier, best for training), or 'appids'"
     )
@@ -92,6 +96,12 @@ def parse_args():
         help="Force re-fetching data bypassing local SQLite cache"
     )
     parser.add_argument(
+        "--no-followers",
+        action="store_true",
+        help="Skip community follower counts (post-launch data for released games, and the slowest, "
+             "most throttled request) - recommended for training scrapes"
+    )
+    parser.add_argument(
         "--append",
         action="store_true",
         help="Append new scraped games to existing CSV without overwriting"
@@ -122,6 +132,13 @@ def main():
     elif args.mode == "balanced":
         logger.info("Discovering tier-balanced training sample of %d games (~13 min of catalog fetches)...", args.limit)
         appids = discoverer.discover_balanced_training_sample(target_count=args.limit)
+    elif args.mode == "balanced-local":
+        exclude = set()
+        if args.append and os.path.exists(args.output):
+            exclude = set(pd.read_csv(args.output, usecols=["appid"])["appid"].astype(int))
+        logger.info("Sampling %d new tier-balanced games from the local catalog (skipping %d already scraped)...",
+                    args.limit, len(exclude))
+        appids = discoverer.discover_balanced_from_catalog(target_count=args.limit, exclude=exclude)
     elif args.mode == "tag":
         logger.info("Discovering games for tag '%s' (limit %d)...", args.tag, args.limit)
         appids = discoverer.discover_by_tag(args.tag, limit=args.limit)
@@ -136,6 +153,7 @@ def main():
     logger.info("Discovered %d AppIDs: %s", len(appids), appids[:10])
 
     pipeline = ScraperPipeline(request_delay=args.delay)
+    pipeline.fetch_followers = not args.no_followers
     df = pipeline.run(
         appids=appids,
         refresh_cache=args.refresh_cache,

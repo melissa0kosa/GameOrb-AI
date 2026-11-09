@@ -161,6 +161,76 @@ class CatalogIndex:
         for idx in (self.dev, self.pub):
             for k in idx:
                 idx[k].sort()
+        self._load_genre_context(catalog_db, {a: float(np.log10(max((p or 0) + (n or 0), 1) * REVIEW_MULTIPLIER))
+                                              for a, _, _, p, n in rows})
+
+    # ---------------------------------------------------------------- genre context
+    # How crowded a game's genre was when it came out, and how well recent games of that
+    # genre sold. "Recent" = the CONTEXT_WINDOW catalog games with the next-lowest AppIDs
+    # (roughly the past year of releases); never includes the game itself.
+    CONTEXT_WINDOW = 8000
+
+    def _load_genre_context(self, catalog_db: str, log_owners: Dict[int, float]):
+        self.has_context = False
+        conn = sqlite3.connect(catalog_db)
+        try:
+            ok = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tag_members'").fetchone()
+            members = conn.execute("SELECT tag, appid FROM tag_members").fetchall() if ok else []
+        finally:
+            conn.close()
+        if not members:
+            return
+        self.cat_appids = np.array(sorted(log_owners), dtype=np.int64)
+        self.cat_log = np.array([log_owners[a] for a in self.cat_appids])
+        by_tag: Dict[str, list] = defaultdict(list)
+        for tag, appid in members:
+            if appid in log_owners:
+                by_tag[tag].append(appid)
+        self.tag_appids, self.tag_log = {}, {}
+        for tag, ids in by_tag.items():
+            ids = np.array(sorted(ids), dtype=np.int64)
+            self.tag_appids[tag] = ids
+            self.tag_log[tag] = np.array([log_owners[a] for a in ids])
+        self.has_context = True
+
+    def context_features(self, appid: int, tags: List[str]) -> dict:
+        """Genre crowding and genre strength, both measured against the same window of
+        releases so they do not depend on how long those games have had to collect reviews:
+        * share   - fraction of recent releases carrying the tag (crowding)
+        * pct     - average sales percentile of the tag's recent games (0.5 = typical game)
+        * top lift - how much more often the tag's games land in the window's top 10%"""
+        appid = int(appid)
+        hi = int(np.searchsorted(self.cat_appids, appid))           # catalog games strictly before
+        lo = max(0, hi - self.CONTEXT_WINDOW)
+        n = hi - lo
+        if n < 50:
+            return {}
+        start, end = self.cat_appids[lo], appid
+        market = np.sort(self.cat_log[lo:hi])
+        top_cut = market[int(n * 0.9)]
+        shares, pcts, lifts = [], [], []
+        for t in tags:
+            ids = self.tag_appids.get(t)
+            if ids is None:
+                continue
+            i, j = np.searchsorted(ids, start), np.searchsorted(ids, end)
+            vals = self.tag_log[t][i:j]
+            shares.append(len(vals) / n)
+            if len(vals) >= 10:
+                pct = (np.searchsorted(market, vals, side="left") + np.searchsorted(market, vals, side="right")) / (2 * n)
+                pcts.append(pct.mean())
+                lifts.append((vals >= top_cut).mean() / 0.1)
+        out = {}
+        if shares:
+            out["ctx_genre_share_mean"] = float(np.mean(shares))
+            out["ctx_genre_share_max"] = float(np.max(shares))
+            out["ctx_genre_share_min"] = float(np.min(shares))       # rarest tag = niche angle
+        if pcts:
+            out["ctx_genre_pct_mean"] = float(np.mean(pcts))
+            out["ctx_genre_pct_best"] = float(np.max(pcts))
+            out["ctx_genre_pct_worst"] = float(np.min(pcts))
+            out["ctx_genre_top_lift"] = float(np.mean(lifts))
+        return out
 
     @staticmethod
     def _history(index: Dict[str, list], companies: List[str], appid: int) -> dict:
@@ -195,13 +265,40 @@ class CatalogIndex:
         }
 
 
+CONTEXT_COLS = ["ctx_genre_share_mean", "ctx_genre_share_max", "ctx_genre_share_min", "ctx_genre_pct_mean",
+                "ctx_genre_pct_best", "ctx_genre_pct_worst", "ctx_genre_top_lift"]
+
+
+def _row_tags(df: pd.DataFrame) -> List[List[str]]:
+    """Each row's 5 most-voted community tags (SteamSpy names) that we have genre lists for.
+
+    Only the top 5 are used on purpose: players add more tags to popular games, so using
+    every tag would leak popularity into the genre features. Rows without the top-5 string
+    (e.g. a manually described game) fall back to the binary tag_* columns."""
+    from scraper.steamspy_api import TOP_COMMUNITY_TAGS
+    known = {t.lower(): t for t in TOP_COMMUNITY_TAGS}
+    cols = {"tag_" + re.sub(r"[^\w]", "_", t.lower()): t for t in TOP_COMMUNITY_TAGS}
+    cols = {c: t for c, t in cols.items() if c in df.columns}
+    vals = {c: pd.to_numeric(df[c], errors="coerce").fillna(0).to_numpy() for c in cols}
+    top5 = df["top_5_tags_str"] if "top_5_tags_str" in df else pd.Series([None] * len(df), index=df.index)
+    out = []
+    for i, s in enumerate(top5):
+        if isinstance(s, str) and s.strip():
+            out.append([known[t.strip().lower()] for t in s.split(",") if t.strip().lower() in known])
+        else:
+            out.append([t for c, t in cols.items() if vals[c][i] > 0][:5])
+    return out
+
+
 def add_track_record_features(df: pd.DataFrame, index: CatalogIndex) -> pd.DataFrame:
     if not index.available:
         return df
-    feats = pd.DataFrame(
-        [index.features(a, devs, pubs) for a, devs, pubs in zip(df["appid"], df["_developers"], df["_publishers"])],
-        index=df.index,
-    )
+    rows = [index.features(a, devs, pubs) for a, devs, pubs in zip(df["appid"], df["_developers"], df["_publishers"])]
+    if getattr(index, "has_context", False):
+        for r, a, tags in zip(rows, df["appid"], _row_tags(df)):
+            r.update({c: np.nan for c in CONTEXT_COLS})
+            r.update(index.context_features(a, tags))
+    feats = pd.DataFrame(rows, index=df.index)
     return pd.concat([df.drop(columns=[c for c in feats.columns if c in df.columns]), feats], axis=1)
 
 
