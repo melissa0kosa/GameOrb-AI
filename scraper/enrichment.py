@@ -14,6 +14,7 @@ Both are pure functions of a DataFrame with an `appid` column, so training and
 inference share exactly the same code path.
 """
 
+import html
 import json
 import os
 import re
@@ -55,9 +56,11 @@ def _size_gb(text: str, labels: str) -> Optional[float]:
 
 
 def normalize_company(name: str) -> str:
-    n = name.lower().strip().strip(",").strip()
+    n = html.unescape(name).lower().strip().strip(",").strip()
     n = re.sub(r"[™®©]", "", n)
-    n = re.sub(r"\s+", " ", n)
+    n = re.sub(r"\((mac|linux|macos|mac/linux|linux/mac|console|pc)\)", "", n)  # porting credits
+    n = re.sub(r"\s+", " ", n).strip()
+    n = re.sub(r"^the\s+", "", n)
     return n
 
 
@@ -143,6 +146,7 @@ class CatalogIndex:
         self.available = os.path.exists(catalog_db)
         self.dev: Dict[str, list] = defaultdict(list)
         self.pub: Dict[str, list] = defaultdict(list)
+        self.own: Dict[int, tuple] = {}                     # appid -> (developers, publishers) per SteamSpy
         self.n_games = 0
         if not self.available:
             return
@@ -154,9 +158,11 @@ class CatalogIndex:
         self.n_games = len(rows)
         for appid, dev, pub, pos, neg in rows:
             lo = float(np.log10(max((pos or 0) + (neg or 0), 1) * REVIEW_MULTIPLIER))
-            for c in split_companies(dev):
+            devs, pubs = split_companies(dev), split_companies(pub)
+            self.own[appid] = (devs, pubs)
+            for c in devs:
                 self.dev[c].append((appid, lo))
-            for c in split_companies(pub):
+            for c in pubs:
                 self.pub[c].append((appid, lo))
         for idx in (self.dev, self.pub):
             for k in idx:
@@ -253,6 +259,8 @@ class CatalogIndex:
     def features(self, appid: int, developers: List[str], publishers: List[str]) -> dict:
         devs = split_companies(developers)
         pubs = split_companies(publishers)
+        if not devs and not pubs and int(appid) in self.own:  # store page lists no studio: use SteamSpy's
+            devs, pubs = self.own[int(appid)]
         d = self._history(self.dev, devs, int(appid))
         p = self._history(self.pub, pubs, int(appid))
         return {

@@ -43,6 +43,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
+from sklearn.base import BaseEstimator, RegressorMixin, clone
 from sklearn.decomposition import TruncatedSVD
 from sklearn.dummy import DummyRegressor
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -187,6 +188,8 @@ class FeatureBuilder:
             if not pd.api.types.is_numeric_dtype(df[c]):
                 continue
             cols.append(c)
+        if "age_years_log" in cols:  # always column 0: AgeTrendGB reads it by position
+            cols.insert(0, cols.pop(cols.index("age_years_log")))
         return cols
 
     def _prep(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -259,6 +262,30 @@ def load_training_data(csv_path: str, cache_db: str = "data/scraper_cache.db",
     return df
 
 
+class AgeTrendGB(BaseEstimator, RegressorMixin):
+    """Gradient boosting plus a straight-line trend in game age (column 0 = age_years_log).
+
+    Trees cannot extrapolate: trained on games that have been on sale for years, they
+    treat a game with less time on sale like the youngest game they saw and over-predict
+    it (+0.19 log10 on the 2023-24 time test). Here a linear age trend is fitted first,
+    the trees learn everything else on top, and the trend is added back - so the age
+    effect continues smoothly beyond the training range. The trend is damped to half its
+    fitted slope (`strength`), which was best on the time test (bias +0.19 -> +0.04,
+    MAE 0.595 -> 0.565) and leaves cross-validation unchanged."""
+
+    def __init__(self, base=None, strength=0.5):
+        self.base, self.strength = base, strength
+
+    def fit(self, X, y, sample_weight=None):
+        age = X[:, 0]
+        self.slope_ = self.strength * np.polyfit(age, y, 1)[0]
+        self.model_ = clone(self.base).fit(X, y - self.slope_ * age, sample_weight=sample_weight)
+        return self
+
+    def predict(self, X):
+        return self.model_.predict(X) + self.slope_ * X[:, 0]
+
+
 def candidate_models():
     return {
         "Baseline (median)": DummyRegressor(strategy="median"),
@@ -267,9 +294,9 @@ def candidate_models():
             n_estimators=500, min_samples_leaf=2, max_features=0.33, random_state=42, n_jobs=-1),
         # tuned on 5.9k games (5-fold x 3): deeper trees + slower learning + feature subsampling
         # cut MAE 0.549 -> 0.516 and lifted the 2023-24 time test from 64.3% to 65.8% tier accuracy
-        "Gradient boosting": HistGradientBoostingRegressor(
+        "Gradient boosting": AgeTrendGB(HistGradientBoostingRegressor(
             max_iter=1200, learning_rate=0.015, max_depth=6, min_samples_leaf=30,
-            l2_regularization=1.0, max_features=0.3, random_state=42),
+            l2_regularization=1.0, max_features=0.3, random_state=42)),
     }
 
 
@@ -343,7 +370,7 @@ def run_ablation(df, y, rpo, with_followers, repeats=3):
     print(f"{'Features':<26}{'#cols':>6}{'MAE log10':>11}{'Spearman':>10}{'Tier acc':>10}")
     for label, kw in steps:
         X = FeatureBuilder(with_followers=with_followers, **kw).fit_transform(df)
-        r = evaluate(gb, X, y, rpo, n_repeats=repeats)
+        r = evaluate(gb if kw.get("use_age", True) else gb.base, X, y, rpo, n_repeats=repeats)
         print(f"{label:<26}{X.shape[1]:>6}{r['mae_log10']:>11.3f}{r['spearman']:>10.3f}{r['tier_acc']:>10.1%}")
 
 
