@@ -33,9 +33,12 @@ log = logging.getLogger("tracker")
 
 DB = "data/velocity_history.db"
 POST_LAUNCH_DAYS = 400       # keep following outcomes for this long after release
-POST_LAUNCH_EVERY = 7        # days between post-launch snapshots
+POST_LAUNCH_EVERY = 7        # days between post-launch snapshots in the first 90 days...
+POST_LAUNCH_LATE_EVERY = 28  # ...and after that (the outcome curve flattens)
 PRE_LAUNCH_DAILY_WINDOW = 60 # daily snapshots when launch is at most this many days away
+VAGUE_DATE_EVERY = 14        # "Coming soon" / "Q1 2027" games are far out: every 2 weeks
 STOREFRONT_MAX_AGE_H = 72    # refresh release info at least every 3 days
+DEFAULT_BUDGET_MIN = 90      # stop a run after this long; leftovers are first in line tomorrow
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tracked_games (
@@ -83,9 +86,18 @@ def discover(conn, discoverer: GameDiscoverer, n_all: int, n_popular: int) -> in
 
 
 def due_games(conn, max_games: int):
-    """Pre-launch: daily within 60 days of launch, every 3 days further out, weekly when the
-    date is vague ("Coming soon", "Q1 2027"). Post-launch: weekly until POST_LAUNCH_DAYS.
-    Steam's community site throttles hard, so this keeps a daily run manageable."""
+    """Which games to snapshot today, most important first.
+
+    Pre-launch: daily within 60 days of launch, every 3 days further out, every 2 weeks
+    when the date is vague ("Coming soon", "Q1 2027"). Post-launch: weekly for 90 days,
+    then every 4 weeks until POST_LAUNCH_DAYS. Steam's community site throttles hard
+    (~6-20 s per game), so this keeps a daily run to roughly an hour.
+
+    Order: (1) games launching within 60 days, closest first - the hype curve right before
+    launch is the data we can never re-collect; (2) games in their first 90 days after
+    launch; (3) everything else, most overdue first. A run that is cut short (time budget,
+    PC asleep) therefore only ever loses the least important games, and they are
+    first in line the next day because they are then the most overdue."""
     today = date.today()
     rows = conn.execute(
         "SELECT appid, released, release_seen_date, last_snapshot FROM tracked_games").fetchall()
@@ -93,23 +105,26 @@ def due_games(conn, max_games: int):
         SELECT appid, days_until_release FROM daily_snapshots s
         WHERE snap_date = (SELECT MAX(snap_date) FROM daily_snapshots WHERE appid = s.appid)
     """).fetchall())
-    pre, post = [], []
+    due, n_pre, n_post = [], 0, 0
     for appid, released, seen, last in rows:
-        last_d = date.fromisoformat(last) if last else None
-        age = (today - last_d).days if last_d else None
+        age = (today - date.fromisoformat(last)).days if last else None
         if not released:
             d = dur.get(appid)
-            interval = 1 if (d is not None and d <= PRE_LAUNCH_DAILY_WINDOW) else (3 if d is not None else 7)
+            soon = d is not None and d <= PRE_LAUNCH_DAILY_WINDOW
+            interval = 1 if soon else (3 if d is not None else VAGUE_DATE_EVERY)
             if age is None or age >= interval:
-                pre.append(appid)
+                n_pre += 1
+                key = (0, d) if soon else (2, -(age if age is not None else 999) / interval)
+                due.append((key, appid))
         else:
             since = (today - date.fromisoformat(seen)).days if seen else 0
-            if since <= POST_LAUNCH_DAYS and (age is None or age >= POST_LAUNCH_EVERY):
-                post.append(appid)
-    # Closest launches first
-    pre.sort(key=lambda a: (dur.get(a) is None, dur.get(a) if dur.get(a) is not None else 0))
-    # Launch window and outcomes matter most; never starve post-launch snapshots
-    return (post + pre)[:max_games], len(pre), len(post)
+            interval = POST_LAUNCH_EVERY if since <= 90 else POST_LAUNCH_LATE_EVERY
+            if since <= POST_LAUNCH_DAYS and (age is None or age >= interval):
+                n_post += 1
+                key = (1, since) if since <= 90 else (2, -(age if age is not None else 999) / interval)
+                due.append((key, appid))
+    due.sort()
+    return [a for _, a in due][:max_games], n_pre, n_post
 
 
 def snapshot(conn, pipe: ScraperPipeline, appid: int) -> bool:
@@ -167,6 +182,8 @@ def main():
     ap.add_argument("--discover-all", type=int, default=300, help="Games to read from the full coming-soon list")
     ap.add_argument("--discover-popular", type=int, default=200, help="Games to read from popular coming soon")
     ap.add_argument("--delay", type=float, default=1.0)
+    ap.add_argument("--budget-min", type=float, default=DEFAULT_BUDGET_MIN,
+                    help="Stop after this many minutes (0 = no limit); unfinished games go first next run")
     ap.add_argument("--status", action="store_true")
     args = ap.parse_args()
 
@@ -183,6 +200,10 @@ def main():
 
     ok = fail = 0
     for i, appid in enumerate(todo, 1):
+        if args.budget_min and time.time() - start > args.budget_min * 60:
+            log.info("Time budget of %.0f min reached: %d games left for the next run.",
+                     args.budget_min, len(todo) - i + 1)
+            break
         try:
             if snapshot(conn, pipe, appid):
                 ok += 1

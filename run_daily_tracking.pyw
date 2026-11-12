@@ -14,6 +14,16 @@ log = open(os.path.join("data", "tracking.log"), "a", encoding="utf-8", bufferin
 sys.stdout = sys.stderr = log
 print(f"===== {datetime.now():%a %m/%d/%Y %H:%M:%S} (windowless) =====")
 
+# Idle sleep was cutting runs short (Windows logged them as terminated). Ask Windows to
+# stay awake while this process runs; it reverts automatically when the process exits.
+# This does not block a manual shutdown, sleep from the Start menu or closing a laptop lid.
+ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+try:
+    import ctypes
+    ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+except Exception:
+    pass
+
 sys.argv = ["track_upcoming.py"] + sys.argv[1:]
 try:
     import track_upcoming
@@ -23,3 +33,8 @@ except SystemExit:
 except Exception:
     import traceback
     traceback.print_exc()
+finally:
+    try:
+        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+    except Exception:
+        pass
